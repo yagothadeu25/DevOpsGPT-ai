@@ -1,0 +1,26 @@
+services:
+  devopsgpt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yagothadeu25/devopsgpt:latest
+    ports:
+      - "8080:8080"
+      - "8089:8089"
+    env_file:
+      - .env
+    volumes:
+      - ./.kube-config:/root/.kube/config:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      - devopsgpt
+    restart: unless-stopped

@@ -2,28 +2,7 @@
 
 > Kubernetes AI Operator — monitora todas as namespaces, detecta erros HTTP em tempo real, analisa com LLM e notifica Slack/Teams automaticamente.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Kubernetes Cluster                        │
-│                                                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │           DevOpsGPT Pod  (ns: devopsgpt)             │  │
-│  │                                                      │  │
-│  │  Watcher ──▶ Analyzers ──▶ LLM Client               │  │
-│  │  (all ns)    Pod/Svc/HPA   Claude | Ollama           │  │
-│  │  60s poll    PVC/Deploy    OpenAI | Bedrock          │  │
-│  │              HTTPError                               │  │
-│  │              Node                                    │  │
-│  │                    │                                 │  │
-│  │        ┌───────────┼──────────────┐                 │  │
-│  │        ▼           ▼              ▼                  │  │
-│  │     Slack        Teams        REST API  MCP Server   │  │
-│  │     Webhook      Webhook      :8080     :8089        │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                          │              │                    │
-│                   React Dashboard  Claude Desktop           │
-└─────────────────────────────────────────────────────────────┘
-```
+![DevOpsGPT Architecture](image/mermaid-diagram.png)
 
 ---
 
@@ -45,7 +24,7 @@ Diferente do K8sGPT que roda via CLI, o DevOpsGPT **vive dentro do cluster** com
 - **Auto-remediation** — engine com risk threshold configurável (`low/medium/high`), dry-run por padrão
 - **REST API** — compatível com o formato do K8sGPT (`POST /v1/analyze`)
 - **MCP Server** — integração com Claude Desktop, com SRE prompt enviado automaticamente no handshake
-- **React Dashboard** — frontend com aba de providers, watcher automático e viewer do SRE prompt
+- **React Dashboard** — frontend dark mode com aba de providers, watcher automático e viewer do SRE prompt
 
 ---
 
@@ -55,7 +34,8 @@ Diferente do K8sGPT que roda via CLI, o DevOpsGPT **vive dentro do cluster** com
 devopsgpt/
 ├── cmd/
 │   └── devopsgpt/
-│       └── main.go                  # Entry point — orquestra todos os componentes
+│       ├── main.go                  # Entry point — orquestra todos os componentes
+│       └── config.go                # Leitura de variáveis de ambiente
 ├── pkg/
 │   ├── analyzer/
 │   │   └── analyzer.go              # Pod, Service, HPA, PVC, Deployment, Node, HTTPError
@@ -71,13 +51,96 @@ devopsgpt/
 │   │   └── server.go                # MCP Server JSON-RPC 2.0 (:8089)
 │   └── server/
 │       └── server.go                # REST API (:8080)
+├── dashboard/
+│   ├── Dashboard.jsx                # React frontend (Vite)
+│   ├── main.jsx                     # Entry point React
+│   ├── index.html                   # HTML base
+│   ├── vite.config.js               # Vite config com proxy para API
+│   ├── package.json
+│   └── Dockerfile                   # Build + preview estático
 ├── deploy/
 │   └── manifests.yaml               # Namespace, RBAC, Secret, ConfigMap, Deployment, SVC, HPA
-├── dashboard/
-│   └── k8sgpt-dashboard.jsx         # React frontend com Provider selector + SRE Prompt viewer
 ├── Dockerfile                       # Multi-stage, distroless
+├── docker-compose.yml               # Sobe devopsgpt + dashboard juntos
+├── .env.example                     # Template de variáveis (copiar para .env)
 ├── go.mod
 └── README.md
+```
+
+---
+
+## Quickstart local (Docker Compose)
+
+### 1. Clonar e configurar
+
+```bash
+git clone https://github.com/yagothadeu25/DevOpsGPT-ai.git
+cd DevOpsGPT-ai
+
+cp .env.example .env
+vim .env  # preencher ANTHROPIC_API_KEY e webhooks
+```
+
+### 2. Configurar kubeconfig
+
+O DevOpsGPT precisa acessar o cluster a partir do container. Crie um kubeconfig com `host.docker.internal` no lugar de `127.0.0.1`:
+
+```bash
+cp ~/.kube/config .kube-config
+sed -i 's|https://127.0.0.1:<porta>|https://host.docker.internal:<porta>|g' .kube-config
+# Desabilitar verificação TLS (ambiente local):
+sed -i 's|certificate-authority-data:.*|insecure-skip-tls-verify: true|g' .kube-config
+```
+
+### 3. Subir
+
+```bash
+docker compose up --build
+```
+
+| Serviço | URL |
+|---|---|
+| Dashboard | http://localhost:3000 |
+| REST API | http://localhost:8080 |
+| MCP Server | http://localhost:8089 |
+
+### 4. Verificar
+
+```bash
+curl http://localhost:8080/healthz
+curl http://localhost:8080/v1/results | jq
+```
+
+---
+
+## Deploy no Kubernetes
+
+### 1. Preencher secrets
+
+```bash
+vim deploy/manifests.yaml  # seção Secret
+```
+
+```yaml
+stringData:
+  ANTHROPIC_API_KEY: "sk-ant-..."
+  SLACK_WEBHOOK_URL:  "https://hooks.slack.com/services/..."
+  TEAMS_WEBHOOK_URL:  "https://..."
+```
+
+### 2. Aplicar
+
+```bash
+kubectl apply -f deploy/manifests.yaml
+kubectl get pods -n devopsgpt -w
+```
+
+### 3. Build e push da imagem
+
+```bash
+docker build -t yagothadeu25/devopsgpt:latest .
+docker push yagothadeu25/devopsgpt:latest
+kubectl rollout restart deploy/devopsgpt -n devopsgpt
 ```
 
 ---
@@ -109,64 +172,12 @@ Para ambientes com requisitos de compliance (PCI-DSS, SOC2), recomenda-se Ollama
 
 ---
 
-## Quickstart
-
-### 1. Preencher secrets
-
-```bash
-# Editar deploy/manifests.yaml — seção Secret
-vim deploy/manifests.yaml
-```
-
-```yaml
-stringData:
-  ANTHROPIC_API_KEY: "sk-ant-..."
-  SLACK_WEBHOOK_URL:  "https://hooks.slack.com/services/..."
-  TEAMS_WEBHOOK_URL:  "https://..."
-```
-
-### 2. Deploy no cluster
-
-```bash
-kubectl apply -f deploy/manifests.yaml
-kubectl get pods -n devopsgpt -w
-```
-
-### 3. Verificar logs
-
-```bash
-kubectl logs -n devopsgpt -l app=devopsgpt -f
-```
-
-### 4. Acessar APIs
-
-```bash
-# REST API
-kubectl port-forward svc/devopsgpt-api 8080:8080 -n devopsgpt
-curl http://localhost:8080/v1/results | jq
-
-# MCP Server (Claude Desktop)
-kubectl port-forward svc/devopsgpt-api 8089:8089 -n devopsgpt
-```
-
-### 5. Build e push da imagem
-
-```bash
-docker build -t yourusername/devopsgpt:latest .
-docker push yourusername/devopsgpt:latest
-
-# Atualizar image no manifests.yaml e reaplicar
-kubectl rollout restart deploy/devopsgpt -n devopsgpt
-```
-
----
-
 ## Variáveis de ambiente
 
 | Variável | Default | Descrição |
 |---|---|---|
 | `LLM_PROVIDER` | `claude` | `claude / ollama / openai / bedrock` |
-| `LLM_MODEL` | `claude-sonnet-4-20250514` | Modelo a usar |
+| `LLM_MODEL` | `claude-3-5-sonnet-20241022` | Modelo a usar |
 | `LLM_BASE_URL` | — | Base URL customizada (Ollama: `http://ollama:11434`) |
 | `POLL_INTERVAL` | `60s` | Intervalo entre scans |
 | `AUTO_REMEDIATE` | `false` | Habilitar auto-correção |
@@ -218,18 +229,6 @@ O MCP Server expõe 5 tools para o Claude Desktop:
 }
 ```
 
-O SRE system prompt é enviado automaticamente no handshake (`initialize.instructions`). O Claude Desktop age como SRE specialist em toda sessão sem configuração adicional.
-
-### Exemplos de perguntas
-
-```
-Quais pods estão em CrashLoop na produção?
-Por que o auth-gateway está retornando 401?
-Resume o estado de saúde do cluster
-Qual namespace tem mais erros hoje?
-Sugira um rollback para o payment-api
-```
-
 ---
 
 ## Auto-remediation
@@ -241,11 +240,9 @@ O engine de auto-remediation aplica comandos `kubectl` gerados pelo LLM, com as 
 - `RISK_THRESHOLD` controla o risco máximo aceito (`low / medium / high`)
 - `DRY_RUN=true` (padrão) apenas loga o comando sem executar
 
-Para habilitar com cautela:
-
 ```yaml
 AUTO_REMEDIATE: "true"
-RISK_THRESHOLD: "low"   # só aplica correções de baixo risco
+RISK_THRESHOLD: "low"
 DRY_RUN: "false"
 ```
 
@@ -263,7 +260,7 @@ O prompt padrão instrui o DevOpsGPT a responder sempre no formato:
 🛡️ PREVENTION: o que adicionar/mudar
 ```
 
-O prompt é editável via aba **SRE Prompt** no dashboard React e via `GET /v1/prompt`.
+Editável via aba **SRE Prompt** no dashboard ou via `GET /v1/prompt`.
 
 ---
 

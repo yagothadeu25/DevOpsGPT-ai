@@ -1,0 +1,37 @@
+# Binaries
+devopsgpt
+*.exe
+*.out
+
+# Go
+vendor/
+
+# Secrets — NUNCA commitar
+.env
+.env.*
+!.env.example
+*.env
+.kube-config
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+secrets.yaml
+*-secrets.yaml
+deploy/manifests.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Docker
+*.tar
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dashboard
+dashboard/node_modules/
+dashboard/dist/

@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>K8sGPT Dashboard — Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #080b0f;
+    --panel:    #0d1117;
+    --border:   #1a2332;
+    --amber:    #f59e0b;
+    --amber-lo: rgba(245,158,11,0.12);
+    --amber-md: rgba(245,158,11,0.25);
+    --green:    #22c55e;
+    --green-lo: rgba(34,197,94,0.12);
+    --blue:     #60a5fa;
+    --blue-lo:  rgba(96,165,250,0.12);
+    --red:      #f87171;
+    --red-lo:   rgba(248,113,113,0.12);
+    --muted:    #374151;
+    --text:     #94a3b8;
+    --white:    #e2e8f0;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Grid noise background ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(rgba(245,158,11,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(245,158,11,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page {
+    position: relative; z-index: 1;
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+
+  /* ── Header ── */
+  .header {
+    text-align: center;
+    margin-bottom: 56px;
+    animation: fade-up 0.6s ease both;
+  }
+  .header-eyebrow {
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    color: var(--amber);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  .header-eyebrow::before,
+  .header-eyebrow::after {
+    content: '';
+    height: 1px;
+    width: 40px;
+    background: var(--amber);
+    opacity: 0.4;
+  }
+  h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: clamp(28px, 5vw, 44px);
+    font-weight: 800;
+    color: var(--white);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+  }
+  h1 span { color: var(--amber); }
+  .header-sub {
+    font-size: 12px;
+    color: var(--text);
+    max-width: 480px;
+    margin: 0 auto;
+    line-height: 1.7;
+  }
+
+  /* ── Section label ── */
+  .section-label {
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── Flow diagram ── */
+  .flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+    margin-bottom: 56px;
+    animation: fade-up 0.6s 0.15s ease both;
+  }
+
+  .flow-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .node-box {
+    position: relative;
+    border-radius: 10px;
+    padding: 18px 22px;
+    text-align: center;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    min-width: 120px;
+    transition: transform 0.2s, border-color 0.2s;
+    cursor: default;
+  }
+  .node-box:hover {
+    transform: translateY(-3px);
+  }
+
+  .node-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+    display: block;
+  }
+  .node-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--white);
+    letter-spacing: 0.05em;
+    margin-bottom: 3px;
+  }
+  .node-sub {
+    font-size: 9px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  /* Node color variants */
+  .node-amber  { border-color: rgba(245,158,11,0.4); background: var(--amber-lo); }
+  .node-amber:hover { border-color: var(--amber); }
+  .node-amber .node-title { color: var(--amber); }
+
+  .node-green  { border-color: rgba(34,197,94,0.4); background: var(--green-lo); }
+  .node-green:hover { border-color: var(--green); }
+  .node-green .node-title { color: var(--green); }
+
+  .node-blue   { border-color: rgba(96,165,250,0.4); background: var(--blue-lo); }
+  .node-blue:hover { border-color: var(--blue); }
+  .node-blue .node-title { color: var(--blue); }
+
+  .node-red    { border-color: rgba(248,113,113,0.4); background: var(--red-lo); }
+  .node-red:hover { border-color: var(--red); }
+  .node-red .node-title { color: var(--red); }
+
+  /* Arrow */
+  .flow-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 0 6px;
+    flex-shrink: 0;
+  }
+  .arrow-line {
+    height: 1px;
+    width: 36px;
+    background: linear-gradient(90deg, var(--muted), var(--amber));
+    position: relative;
+  }
+  .arrow-line::after {
+    content: '▶';
+    position: absolute;
+    right: -6px;
+    top: -7px;
+    font-size: 8px;
+    color: var(--amber);
+  }
+  .arrow-label {
+    font-size: 8px;
+    color: var(--amber);
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+
+  /* ── Detail cards grid ── */
+  .cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin-bottom: 56px;
+    animation: fade-up 0.6s 0.3s ease both;
+  }
+
+  .detail-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .detail-card:hover {
+    border-color: var(--border);
+    transform: translateY(-2px);
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .card-icon {
+    font-size: 20px;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+  .card-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--white);
+  }
+  .card-subtitle {
+    font-size: 9px;
+    color: var(--text);
+    margin-top: 1px;
+  }
+
+  .card-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .card-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .card-list li::before {
+    content: '›';
+    color: var(--amber);
+    font-size: 14px;
+    line-height: 1.2;
+    flex-shrink: 0;
+  }
+
+  /* ── Data flow section ── */
+  .data-flow {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px;
+    margin-bottom: 56px;
+    animation: fade-up 0.6s 0.45s ease both;
+  }
+
+  .step-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .step {
+    display: flex;
+    gap: 16px;
+    padding: 16px 0;
+    position: relative;
+  }
+  .step:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 15px;
+    top: 44px;
+    bottom: 0;
+    width: 1px;
+    background: var(--border);
+  }
+
+  .step-num {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: var(--amber-lo);
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    z-index: 1;
+  }
+  .step-content { flex: 1; padding-top: 4px; }
+  .step-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--white);
+    margin-bottom: 5px;
+  }
+  .step-desc {
+    font-size: 11px;
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .step-code {
+    display: inline-block;
+    background: #0a0d12;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 10px;
+    color: var(--amber);
+    margin-top: 6px;
+  }
+
+  /* ── API ref ── */
+  .api-ref {
+    background: #0a0d12;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 56px;
+    animation: fade-up 0.6s 0.6s ease both;
+  }
+  .api-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .api-row:last-child { border-bottom: none; }
+  .api-method {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    min-width: 44px;
+    text-align: center;
+  }
+  .method-post { background: rgba(34,197,94,0.15); color: var(--green); }
+  .method-get  { background: rgba(96,165,250,0.15); color: var(--blue); }
+  .api-path { font-size: 11px; color: var(--white); flex: 1; }
+  .api-desc { font-size: 10px; color: var(--text); }
+
+  /* ── LLM backends ── */
+  .backends {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 56px;
+    animation: fade-up 0.6s 0.75s ease both;
+  }
+  .backend-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--text);
+    transition: border-color 0.2s;
+  }
+  .backend-pill:hover { border-color: var(--amber); color: var(--white); }
+  .backend-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 6px var(--amber);
+  }
+
+  /* ── Animations ── */
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+  }
+
+  .live-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+
+  /* ── Footer ── */
+  .footer {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--muted);
+    flex-wrap: wrap;
+    gap: 8px;
+    animation: fade-up 0.6s 0.9s ease both;
+  }
+
+  @media (max-width: 600px) {
+    .flow { gap: 8px; }
+    .flow-arrow { display: none; }
+    .flow-node { width: 48%; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-eyebrow">ARCHITECTURE OVERVIEW</div>
+    <h1>K8sGPT <span>Dashboard</span></h1>
+    <p class="header-sub">
+      How the React frontend connects to K8sGPT's REST API to deliver
+      AI-powered Kubernetes cluster diagnostics in real time.
+    </p>
+  </div>
+
+  <!-- Flow diagram -->
+  <div class="section-label">data flow</div>
+  <div class="flow">
+
+    <div class="flow-node">
+      <div class="node-box node-amber">
+        <span class="node-icon">🖥️</span>
+        <div class="node-title">React Frontend</div>
+        <div class="node-sub">Browser UI<br>Dashboard</div>
+      </div>
+    </div>
+
+    <div class="flow-arrow">
+      <div class="arrow-line"></div>
+      <div class="arrow-label">POST /v1/analyze</div>
+    </div>
+
+    <div class="flow-node">
+      <div class="node-box node-blue">
+        <span class="node-icon">⚙️</span>
+        <div class="node-title">k8sgpt serve</div>
+        <div class="node-sub">REST API<br>:8080</div>
+      </div>
+    </div>
+
+    <div class="flow-arrow">
+      <div class="arrow-line"></div>
+      <div class="arrow-label">kubectl API</div>
+    </div>
+
+    <div class="flow-node">
+      <div class="node-box node-green">
+        <span class="node-icon">☸️</span>
+        <div class="node-title">Kubernetes</div>
+        <div class="node-sub">Cluster<br>Resources</div>
+      </div>
+    </div>
+
+    <div class="flow-arrow">
+      <div class="arrow-line"></div>
+      <div class="arrow-label">LLM prompt</div>
+    </div>
+
+    <div class="flow-node">
+      <div class="node-box node-red">
+        <span class="node-icon">🤖</span>
+        <div class="node-title">LLM Backend</div>
+        <div class="node-sub">Ollama / OpenAI<br>Bedrock / Gemini</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Detail cards -->
+  <div class="section-label">components</div>
+  <div class="cards-grid">
+
+    <div class="detail-card">
+      <div class="card-header">
+        <div class="card-icon" style="background:var(--amber-lo)">🖥️</div>
+        <div>
+          <div class="card-title">React Frontend</div>
+          <div class="card-subtitle">k8sgpt-dashboard.jsx</div>
+        </div>
+      </div>
+      <ul class="card-list">
+        <li>Config panel com URL da API e namespace</li>
+        <li>Stats cards com contagem por severidade</li>
+        <li>Issue cards expansíveis com AI analysis</li>
+        <li>Filter por severity + busca em tempo real</li>
+        <li>Demo mode com mock data embutido</li>
+      </ul>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-header">
+        <div class="card-icon" style="background:var(--blue-lo)">⚙️</div>
+        <div>
+          <div class="card-title">k8sgpt serve</div>
+          <div class="card-subtitle">REST HTTP server</div>
+        </div>
+      </div>
+      <ul class="card-list">
+        <li>Expõe API REST na porta 8080</li>
+        <li>Roda analyzers internos no cluster</li>
+        <li>Anonymiza dados sensíveis (pods, namespaces)</li>
+        <li>Envia contexto para o LLM configurado</li>
+        <li>Retorna diagnóstico em linguagem natural</li>
+      </ul>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-header">
+        <div class="card-icon" style="background:var(--green-lo)">☸️</div>
+        <div>
+          <div class="card-title">Kubernetes Cluster</div>
+          <div class="card-subtitle">recursos analisados</div>
+        </div>
+      </div>
+      <ul class="card-list">
+        <li>Pods em CrashLoopBackOff / OOMKilled</li>
+        <li>Services sem endpoints</li>
+        <li>HPAs com falha de métricas</li>
+        <li>PVCs em Pending</li>
+        <li>Deployments com rollout travado</li>
+      </ul>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-header">
+        <div class="card-icon" style="background:var(--red-lo)">🤖</div>
+        <div>
+          <div class="card-title">LLM Backend</div>
+          <div class="card-subtitle">providers suportados</div>
+        </div>
+      </div>
+      <ul class="card-list">
+        <li>Ollama (local, sem dados externos)</li>
+        <li>OpenAI GPT-4o</li>
+        <li>Amazon Bedrock / Claude</li>
+        <li>Google Gemini</li>
+        <li>Azure OpenAI</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <!-- Step-by-step -->
+  <div class="section-label">passo a passo</div>
+  <div class="data-flow">
+    <div class="step-list">
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <div class="step-title">Iniciar o servidor K8sGPT</div>
+          <div class="step-desc">
+            Sobe o servidor HTTP que vai receber as requisições do frontend.
+            Precisa estar autenticado com um LLM backend previamente.
+          </div>
+          <span class="step-code">k8sgpt auth add --backend ollama --model llama3</span><br>
+          <span class="step-code">k8sgpt serve --port 8080</span>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <div class="step-title">Frontend chama POST /v1/analyze</div>
+          <div class="step-desc">
+            O dashboard envia uma requisição com o namespace alvo e a flag
+            <code style="color:var(--amber)">explain: true</code> para receber a análise detalhada do LLM.
+          </div>
+          <span class="step-code">POST http://localhost:8080/v1/analyze</span>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <div class="step-title">K8sGPT escaneia o cluster via kubectl</div>
+          <div class="step-desc">
+            Os analyzers internos inspecionam Pods, Services, HPAs, PVCs e Deployments.
+            Dados sensíveis são anonimizados antes de seguir para o LLM.
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-content">
+          <div class="step-title">LLM gera diagnóstico e solução</div>
+          <div class="step-desc">
+            O contexto anonimizado é enviado ao LLM configurado (Ollama, OpenAI, etc.).
+            O modelo retorna a causa raiz e os passos de correção em linguagem natural.
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-content">
+          <div class="step-title">Dashboard renderiza os resultados</div>
+          <div class="step-desc">
+            O frontend exibe os issues agrupados por severidade (critical, error, warning, info),
+            com filtros e busca em tempo real. Cada card expansível mostra o AI analysis completo.
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- API Reference -->
+  <div class="section-label">api endpoints</div>
+  <div class="api-ref">
+    <div class="api-row">
+      <span class="api-method method-post">POST</span>
+      <div>
+        <div class="api-path">/v1/analyze</div>
+        <div class="api-desc">Executa análise completa. Body: <code style="color:var(--amber)">{ namespace, explain, filters }</code></div>
+      </div>
+    </div>
+    <div class="api-row">
+      <span class="api-method method-get">GET</span>
+      <div>
+        <div class="api-path">/v1/analyze</div>
+        <div class="api-desc">Retorna última análise cacheada</div>
+      </div>
+    </div>
+    <div class="api-row">
+      <span class="api-method method-get">GET</span>
+      <div>
+        <div class="api-path">/healthz</div>
+        <div class="api-desc">Health check do servidor</div>
+      </div>
+    </div>
+    <div class="api-row">
+      <span class="api-method method-get">GET</span>
+      <div>
+        <div class="api-path">/v1/filters</div>
+        <div class="api-desc">Lista analyzers disponíveis (Pod, Service, HPA…)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LLM Backends -->
+  <div class="section-label">llm backends suportados</div>
+  <div class="backends">
+    <div class="backend-pill"><div class="backend-dot"></div>Ollama (local)</div>
+    <div class="backend-pill"><div class="backend-dot"></div>OpenAI GPT-4o</div>
+    <div class="backend-pill"><div class="backend-dot"></div>Amazon Bedrock</div>
+    <div class="backend-pill"><div class="backend-dot"></div>Anthropic Claude</div>
+    <div class="backend-pill"><div class="backend-dot"></div>Google Gemini</div>
+    <div class="backend-pill"><div class="backend-dot"></div>Azure OpenAI</div>
+    <div class="backend-pill"><div class="backend-dot"></div>Hugging Face</div>
+    <div class="backend-pill"><div class="backend-dot"></div>LocalAI</div>
+    <div class="backend-pill"><div class="backend-dot"></div>Cohere</div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span>k8sgpt-dashboard · architecture diagram</span>
+    <span><span class="live-dot"></span>docs: docs.k8sgpt.ai</span>
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,39 @@
+# Secrets
+.env
+.env.*
+.kube-config
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+secrets.yaml
+*-secrets.yaml
+
+# Git
+.git/
+.gitignore
+
+# Binaries
+devopsgpt
+*.exe
+*.out
+
+# Dashboard (built separately)
+dashboard/
+
+# Go dev artifacts
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar
+Dockerfile*
+docker-compose*.yml
