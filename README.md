@@ -19,12 +19,14 @@ Diferente do K8sGPT que roda via CLI, o DevOpsGPT **vive dentro do cluster** com
 - **All-namespace monitoring** — escaneia todos os namespaces automaticamente a cada intervalo configurável
 - **HTTP error detection** — detecta `401`, `404`, `500`, `503`, timeouts e connection resets nos logs dos pods
 - **Multi-LLM** — suporte a Claude, Ollama (local), OpenAI e AWS Bedrock via interface unificada
-- **SRE system prompt** — análise estruturada com causa raiz, ação imediata, fix permanente e prevenção
-- **Slack + Teams** — notificações simultâneas com Adaptive Cards e formatação de severidade
+- **SRE system prompt** — fonte única em `pkg/prompt`, análise estruturada com causa raiz, ação imediata, fix permanente e prevenção
+- **Slack + Teams** — notificações simultâneas com retry/backoff, Adaptive Cards e formatação de severidade
 - **Auto-remediation** — engine com risk threshold configurável (`low/medium/high`), dry-run por padrão
-- **REST API** — compatível com o formato do K8sGPT (`POST /v1/analyze`)
-- **MCP Server** — integração com Claude Desktop, com SRE prompt enviado automaticamente no handshake
+- **REST API** — compatível com o formato do K8sGPT (`POST /v1/analyze`), autenticação via Bearer token e CORS configurável
+- **MCP Server** — integração com Claude Desktop, com SRE prompt enviado automaticamente no handshake e `get_pod_logs` com logs reais
 - **React Dashboard** — frontend dark mode com aba de providers, watcher automático e viewer do SRE prompt
+- **Prometheus metrics** — `/metrics` com contagem de issues, latência do LLM, notificações e remediações
+- **Resiliência** — mutex em todas as operações concorrentes, retry com backoff exponencial, timeout de 30s no LLM, cache limitado a 500 resultados
 
 ---
 
@@ -41,16 +43,20 @@ devopsgpt/
 │   │   └── analyzer.go              # Pod, Service, HPA, PVC, Deployment, Node, HTTPError
 │   ├── llm/
 │   │   └── client.go                # Claude, Ollama, OpenAI, Bedrock (interface unificada)
+│   ├── prompt/
+│   │   └── prompt.go                # Fonte única do SRE system prompt
+│   ├── metrics/
+│   │   └── metrics.go               # Prometheus metrics (issues, LLM, notify, remediation)
 │   ├── watcher/
-│   │   └── watcher.go               # Watch loop + LLM enrichment
+│   │   └── watcher.go               # Watch loop + mutex + retry + LLM timeout
 │   ├── notify/
-│   │   └── notifier.go              # Slack + Teams
+│   │   └── notifier.go              # Slack + Teams com retry/backoff e zap logger
 │   ├── remediation/
 │   │   └── remediation.go           # Auto-fix com risk threshold
 │   ├── mcp/
-│   │   └── server.go                # MCP Server JSON-RPC 2.0 (:8089)
+│   │   └── server.go                # MCP Server JSON-RPC 2.0 (:8089) + pod logs reais
 │   └── server/
-│       └── server.go                # REST API (:8080)
+│       └── server.go                # REST API (:8080) + auth + CORS + /metrics
 ├── dashboard/
 │   ├── Dashboard.jsx                # React frontend (Vite)
 │   ├── main.jsx                     # Entry point React
@@ -187,6 +193,8 @@ Para ambientes com requisitos de compliance (PCI-DSS, SOC2), recomenda-se Ollama
 | `MCP_PORT` | `8089` | Porta MCP Server |
 | `SLACK_WEBHOOK_URL` | — | Webhook Slack |
 | `TEAMS_WEBHOOK_URL` | — | Webhook Microsoft Teams |
+| `API_TOKEN` | — | Bearer token para proteger a REST API (opcional) |
+| `ALLOW_ORIGIN` | `http://localhost:3000` | CORS origin permitida |
 
 ---
 
@@ -196,11 +204,14 @@ Para ambientes com requisitos de compliance (PCI-DSS, SOC2), recomenda-se Ollama
 |---|---|---|
 | `GET` | `/healthz` | Health check |
 | `GET` | `/readyz` | Readiness probe |
+| `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/v1/results` | Todos os issues com AI analysis |
 | `POST` | `/v1/analyze` | Trigger análise (compatível com K8sGPT) |
 | `GET` | `/v1/summary` | Saúde por namespace |
 | `GET` | `/v1/providers` | Providers LLM disponíveis |
 | `GET` | `/v1/prompt` | SRE system prompt atual |
+
+> Endpoints `/v1/*` requerem `Authorization: Bearer <API_TOKEN>` quando `API_TOKEN` está configurado.
 
 ---
 
