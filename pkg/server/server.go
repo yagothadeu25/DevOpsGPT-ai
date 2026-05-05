@@ -4,16 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/yagothadeu25/devopsgpt/pkg/prompt"
 	"github.com/yagothadeu25/devopsgpt/pkg/watcher"
 	"go.uber.org/zap"
 )
 
 type Config struct {
-	Port    string
-	Watcher *watcher.Watcher
-	Logger  *zap.Logger
+	Port        string
+	Watcher     *watcher.Watcher
+	Logger      *zap.Logger
+	APIToken    string // optional — if set, requires Authorization: Bearer <token>
+	AllowOrigin string // CORS origin, defaults to http://localhost:3000
 }
 
 type Server struct {
@@ -22,6 +27,9 @@ type Server struct {
 }
 
 func New(cfg Config) *Server {
+	if cfg.AllowOrigin == "" {
+		cfg.AllowOrigin = "http://localhost:3000"
+	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
 	s.routes()
 	return s
@@ -33,40 +41,57 @@ func (s *Server) Start(ctx context.Context) {
 		Handler:      s.mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 	s.cfg.Logger.Info("REST API started", zap.String("port", s.cfg.Port))
 	go func() {
 		<-ctx.Done()
-		srv.Shutdown(context.Background())
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutCtx)
 	}()
 	srv.ListenAndServe()
 }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("/healthz",      s.handleHealth)
-	s.mux.HandleFunc("/readyz",       s.handleReady)
-	s.mux.HandleFunc("/v1/results",   s.handleResults)
-	s.mux.HandleFunc("/v1/analyze",   s.handleAnalyze)
-	s.mux.HandleFunc("/v1/summary",   s.handleSummary)
-	s.mux.HandleFunc("/v1/providers", s.handleProviders)
-	s.mux.HandleFunc("/v1/prompt",    s.handlePrompt)
+	s.mux.HandleFunc("/healthz", s.handleHealth)
+	s.mux.HandleFunc("/readyz", s.handleReady)
+	s.mux.Handle("/metrics", promhttp.Handler())
+	s.mux.HandleFunc("/v1/results", s.auth(s.handleResults))
+	s.mux.HandleFunc("/v1/analyze", s.auth(s.handleAnalyze))
+	s.mux.HandleFunc("/v1/summary", s.auth(s.handleSummary))
+	s.mux.HandleFunc("/v1/providers", s.auth(s.handleProviders))
+	s.mux.HandleFunc("/v1/prompt", s.auth(s.handlePrompt))
 }
 
-// GET /healthz
+func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.cors(w, r)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		if s.cfg.APIToken != "" {
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if token != s.cfg.APIToken {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.json(w, map[string]string{"status": "ok"})
 }
 
-// GET /readyz
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	s.json(w, map[string]string{"status": "ready"})
 }
 
-// GET /v1/results — returns all current scan results
 func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
-	s.cors(w)
 	results := s.cfg.Watcher.GetResults()
-	var out []map[string]any
+	out := make([]map[string]any, 0, len(results))
 	for _, r := range results {
 		out = append(out, map[string]any{
 			"id":           r.Issue.ID,
@@ -81,21 +106,12 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 			"scanned_at":   r.ScannedAt.Format(time.RFC3339),
 		})
 	}
-	if out == nil {
-		out = []map[string]any{}
-	}
 	s.json(w, map[string]any{"results": out, "total": len(out)})
 }
 
-// POST /v1/analyze — compatible with k8sgpt API format
 func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
-	s.cors(w)
-	if r.Method == http.MethodOptions {
-		return
-	}
-	// Trigger a new scan (async) and return current results
 	results := s.cfg.Watcher.GetResults()
-	var out []map[string]any
+	out := make([]map[string]any, 0, len(results))
 	for _, r := range results {
 		out = append(out, map[string]any{
 			"name":      r.Issue.Name,
@@ -106,15 +122,10 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 			"severity":  r.Issue.Severity,
 		})
 	}
-	if out == nil {
-		out = []map[string]any{}
-	}
 	s.json(w, map[string]any{"results": out})
 }
 
-// GET /v1/summary — namespace health summary
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
-	s.cors(w)
 	results := s.cfg.Watcher.GetResults()
 	summary := map[string]map[string]int{}
 	for _, r := range results {
@@ -128,50 +139,21 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	s.json(w, summary)
 }
 
-// GET /v1/providers — available LLM providers and current selection
 func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
-	s.cors(w)
 	s.json(w, map[string]any{
 		"providers": []map[string]any{
-			{
-				"id":          "claude",
-				"name":        "Claude (Anthropic)",
-				"models":      []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"},
-				"requires_key": true,
-				"local":       false,
-			},
-			{
-				"id":          "ollama",
-				"name":        "Ollama (Local)",
-				"models":      []string{"llama3", "mistral", "codellama", "phi3", "gemma2"},
-				"requires_key": false,
-				"local":       true,
-			},
-			{
-				"id":          "openai",
-				"name":        "OpenAI",
-				"models":      []string{"gpt-4o", "gpt-4o-mini", "gpt-4-turbo"},
-				"requires_key": true,
-				"local":       false,
-			},
-			{
-				"id":          "bedrock",
-				"name":        "AWS Bedrock",
-				"models":      []string{"anthropic.claude-3-5-sonnet-20241022-v2:0", "amazon.titan-text-premier-v1:0"},
-				"requires_key": false,
-				"local":       false,
-				"note":        "Uses AWS IAM credentials",
-			},
+			{"id": "claude", "name": "Claude (Anthropic)", "models": []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514"}, "requires_key": true, "local": false},
+			{"id": "ollama", "name": "Ollama (Local)", "models": []string{"llama3", "mistral", "codellama", "phi3"}, "requires_key": false, "local": true},
+			{"id": "openai", "name": "OpenAI", "models": []string{"gpt-4o", "gpt-4o-mini", "gpt-4-turbo"}, "requires_key": true, "local": false},
+			{"id": "bedrock", "name": "AWS Bedrock", "models": []string{"anthropic.claude-3-5-sonnet-20241022-v2:0"}, "requires_key": false, "local": false},
 		},
 	})
 }
 
-// GET /v1/prompt — returns the SRE system prompt
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
-	s.cors(w)
 	s.json(w, map[string]any{
 		"role":   "DevOpsGPT — SRE Specialist",
-		"prompt": "See /mcp for the full system prompt used by the MCP server",
+		"prompt": prompt.SRESystemPrompt,
 	})
 }
 
@@ -180,8 +162,11 @@ func (s *Server) json(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func (s *Server) cors(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+func (s *Server) cors(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == s.cfg.AllowOrigin || s.cfg.AllowOrigin == "*" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 }

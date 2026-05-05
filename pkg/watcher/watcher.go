@@ -3,11 +3,14 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/yagothadeu25/devopsgpt/pkg/analyzer"
 	"github.com/yagothadeu25/devopsgpt/pkg/llm"
+	"github.com/yagothadeu25/devopsgpt/pkg/metrics"
 	"github.com/yagothadeu25/devopsgpt/pkg/notify"
+	prompt_pkg "github.com/yagothadeu25/devopsgpt/pkg/prompt"
 	"github.com/yagothadeu25/devopsgpt/pkg/remediation"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,30 +19,12 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// SRE system prompt — the "brain" of DevOpsGPT
-const sreSystemPrompt = `You are DevOpsGPT, an expert SRE and Kubernetes specialist with deep knowledge of:
-- Kubernetes internals, pod lifecycle, networking, storage
-- HTTP error patterns (401, 404, 500, 503, timeouts, connection resets)
-- Fintech and credit platform reliability patterns
-- Security and compliance best practices
-
-When analyzing issues:
-1. Identify the ROOT CAUSE clearly
-2. Assess the SEVERITY (critical/error/warning/info)
-3. Provide STEP-BY-STEP remediation commands
-4. Estimate RISK of auto-remediation (low/medium/high)
-5. Suggest PREVENTIVE measures
-
-Always respond in JSON format:
-{
-  "root_cause": "...",
-  "severity": "critical|error|warning|info",
-  "explanation": "...",
-  "remediation_steps": ["kubectl ...", "..."],
-  "auto_remediation_risk": "low|medium|high",
-  "auto_remediation_cmd": "kubectl ...",
-  "prevention": "..."
-}`
+const (
+	llmTimeout     = 30 * time.Second
+	maxRetries     = 3
+	retryBaseDelay = 2 * time.Second
+	maxResults     = 500
+)
 
 type Config struct {
 	AllNamespaces bool
@@ -52,9 +37,10 @@ type Config struct {
 }
 
 type Watcher struct {
-	cfg    Config
-	k8s    kubernetes.Interface
-	cache  map[string]*analyzer.Issue // issue ID → last seen
+	cfg     Config
+	k8s     kubernetes.Interface
+	mu      sync.RWMutex
+	cache   map[string]*analyzer.Issue
 	results []*analyzer.Result
 }
 
@@ -71,7 +57,6 @@ func New(cfg Config) (*Watcher, error) {
 }
 
 func newK8sClient() (kubernetes.Interface, error) {
-	// Try in-cluster first (when running as pod), then fallback to kubeconfig
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		cfg, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
@@ -82,13 +67,11 @@ func newK8sClient() (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(cfg)
 }
 
-// Run starts the main watch loop
 func (w *Watcher) Run(ctx context.Context) {
 	w.cfg.Logger.Info("watcher started", zap.Duration("interval", w.cfg.PollInterval))
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
 
-	// Run immediately on start
 	w.scan(ctx)
 
 	for {
@@ -104,6 +87,7 @@ func (w *Watcher) Run(ctx context.Context) {
 
 func (w *Watcher) scan(ctx context.Context) {
 	w.cfg.Logger.Info("scanning all namespaces")
+	metrics.ScansTotal.Inc()
 
 	namespaces, err := w.getNamespaces(ctx)
 	if err != nil {
@@ -112,7 +96,6 @@ func (w *Watcher) scan(ctx context.Context) {
 	}
 
 	var allIssues []*analyzer.Issue
-
 	for _, ns := range namespaces {
 		issues, err := w.cfg.Registry.RunAll(ctx, w.k8s, ns)
 		if err != nil {
@@ -122,14 +105,36 @@ func (w *Watcher) scan(ctx context.Context) {
 		allIssues = append(allIssues, issues...)
 	}
 
-	// Enrich new/changed issues with LLM analysis
+	// Update active issues gauge
+	sevCount := map[string]float64{"critical": 0, "error": 0, "warning": 0, "info": 0}
+	for _, i := range allIssues {
+		sevCount[string(i.Severity)]++
+	}
+	for sev, count := range sevCount {
+		metrics.ActiveIssues.WithLabelValues(sev).Set(count)
+	}
+
+	w.mu.Lock()
 	var newIssues []*analyzer.Issue
 	for _, issue := range allIssues {
 		if _, seen := w.cache[issue.ID]; !seen {
 			newIssues = append(newIssues, issue)
 			w.cache[issue.ID] = issue
+			metrics.IssuesDetected.WithLabelValues(string(issue.Severity), issue.Namespace, issue.Kind).Inc()
 		}
 	}
+
+	// Clear resolved issues from cache
+	activeIDs := make(map[string]bool, len(allIssues))
+	for _, i := range allIssues {
+		activeIDs[i.ID] = true
+	}
+	for id := range w.cache {
+		if !activeIDs[id] {
+			delete(w.cache, id)
+		}
+	}
+	w.mu.Unlock()
 
 	if len(newIssues) == 0 {
 		w.cfg.Logger.Info("scan complete — no new issues", zap.Int("total", len(allIssues)))
@@ -145,50 +150,88 @@ func (w *Watcher) scan(ctx context.Context) {
 			continue
 		}
 
+		w.mu.Lock()
+		if len(w.results) >= maxResults {
+			w.results = w.results[len(w.results)-maxResults+1:]
+		}
 		w.results = append(w.results, result)
+		w.mu.Unlock()
 
-		// Notify Slack/Teams
-		if err := w.cfg.Notifier.Send(ctx, result); err != nil {
-			w.cfg.Logger.Error("notification failed", zap.Error(err))
+		if err := w.withRetry(ctx, "notify", func() error {
+			return w.cfg.Notifier.Send(ctx, result)
+		}); err != nil {
+			w.cfg.Logger.Error("notification failed after retries", zap.Error(err))
 		}
 
-		// Auto-remediate if risk is acceptable
 		if err := w.cfg.Remediator.Remediate(ctx, result); err != nil {
 			w.cfg.Logger.Error("remediation failed", zap.Error(err))
-		}
-	}
-
-	// Clear resolved issues from cache
-	activeIDs := make(map[string]bool)
-	for _, i := range allIssues {
-		activeIDs[i.ID] = true
-	}
-	for id := range w.cache {
-		if !activeIDs[id] {
-			delete(w.cache, id)
 		}
 	}
 }
 
 func (w *Watcher) analyzeWithLLM(ctx context.Context, issue *analyzer.Issue) (*analyzer.Result, error) {
-	prompt := fmt.Sprintf(
+	llmCtx, cancel := context.WithTimeout(ctx, llmTimeout)
+	defer cancel()
+
+	start := time.Now()
+	provider := string(w.cfg.LLMClient.Provider())
+
+	msg := fmt.Sprintf(
 		"Analyze this Kubernetes issue:\n\nResource: %s/%s in namespace %s\nError: %s\nRaw data: %s",
 		issue.Kind, issue.Name, issue.Namespace, issue.Error, issue.RawData,
 	)
 
-	resp, err := w.cfg.LLMClient.Complete(ctx, sreSystemPrompt, []llm.Message{
-		{Role: "user", Content: prompt},
+	var resp *llm.Response
+	err := w.withRetry(llmCtx, "llm", func() error {
+		var e error
+		resp, e = w.cfg.LLMClient.Complete(llmCtx, prompt_pkg.SRESystemPrompt, []llm.Message{
+			{Role: "user", Content: msg},
+		})
+		return e
 	})
+
+	duration := time.Since(start).Seconds()
+	status := "success"
 	if err != nil {
+		status = "error"
+		metrics.LLMRequestDuration.WithLabelValues(provider, status).Observe(duration)
+		metrics.LLMRequestsTotal.WithLabelValues(provider, status).Inc()
 		return nil, err
 	}
 
+	metrics.LLMRequestDuration.WithLabelValues(provider, status).Observe(duration)
+	metrics.LLMRequestsTotal.WithLabelValues(provider, status).Inc()
+
 	return &analyzer.Result{
-		Issue:    issue,
-		Analysis: resp.Content,
-		LLMUsed:  string(w.cfg.LLMClient.Provider()),
+		Issue:     issue,
+		Analysis:  resp.Content,
+		LLMUsed:   provider,
 		ScannedAt: time.Now(),
 	}, nil
+}
+
+func (w *Watcher) withRetry(ctx context.Context, op string, fn func() error) error {
+	var err error
+	for i := 0; i < maxRetries; i++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if i < maxRetries-1 {
+			delay := retryBaseDelay * time.Duration(i+1)
+			w.cfg.Logger.Warn("retrying operation",
+				zap.String("op", op),
+				zap.Int("attempt", i+1),
+				zap.Duration("delay", delay),
+				zap.Error(err),
+			)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+	return fmt.Errorf("%s failed after %d retries: %w", op, maxRetries, err)
 }
 
 func (w *Watcher) getNamespaces(ctx context.Context) ([]string, error) {
@@ -196,12 +239,21 @@ func (w *Watcher) getNamespaces(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var names []string
+	names := make([]string, 0, len(nsList.Items))
 	for _, ns := range nsList.Items {
 		names = append(names, ns.Name)
 	}
 	return names, nil
 }
 
-// GetResults returns current scan results (used by REST API and MCP)
-func (w *Watcher) GetResults() []*analyzer.Result { return w.results }
+func (w *Watcher) GetResults() []*analyzer.Result {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	out := make([]*analyzer.Result, len(w.results))
+	copy(out, w.results)
+	return out
+}
+
+func (w *Watcher) K8sClient() kubernetes.Interface {
+	return w.k8s
+}
